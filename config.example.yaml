@@ -1,0 +1,29 @@
+# Example configuration for local-sales-posting-tool
+# Copy to config.yaml and customize as needed.
+
+default_location: "Arlington, VA"
+default_postal_code: "22201"
+date_format: "%Y-%m-%d"
+
+# Text included in EVERY generated listing (Craigslist, Facebook Marketplace, Freecycle)
+common_text: >-
+  Cash only. No shipping available, no checks, no electronic payment apps.
+  Local pickup / meet in Arlington, VA.
+
+# Service-specific text included ONLY on that individual platform
+service_unique_text:
+  craigslist: >-
+    Contact through Craigslist chat or Craigslist email relay only.
+    Do not ask for personal phone numbers or off-platform texts.
+  facebook: >-
+    Contact through Facebook Messenger / Marketplace chat only to coordinate
+    an Arlington pickup time. If this listing is up, it is still available.
+  freecycle: >-
+    Freecycle OFFER: Please reply via Freecycle with your proposed pickup
+    day and time window in Arlington.
+
+# Direct posting entrypoints opened by Playwright and launchpad.html
+service_urls:
+  craigslist: "https://post.craigslist.org"
+  facebook: "https://www.facebook.com/marketplace/create/item"
+  freecycle: "https://www.freecycle.org/town/ArlingtonVA"

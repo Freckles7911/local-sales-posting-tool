@@ -1,0 +1,18 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+
+# Generated albums, staged images, credentials, and local configs
+albums/
+config.yaml
+credentials.json
+token.json
+*.zip
+*.log
+
+# Playwright / browser session artifacts
+browser-profile/
