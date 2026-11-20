@@ -91,7 +91,7 @@ def normalize_services(services: Sequence[str]) -> List[str]:
 
 @dataclass
 class ItemDetails:
-    """User-supplied item metadata for generating multi-platform listings."""
+    """User-supplied and enriched item metadata for generating multi-platform listings."""
 
     title: str
     body: str
@@ -102,6 +102,12 @@ class ItemDetails:
     dimensions: Optional[str] = None
     extra_notes: Optional[str] = None
     category_hint: Optional[str] = None
+    brand: Optional[str] = None
+    model_number: Optional[str] = None
+    manufacturer_url: Optional[str] = None
+    manufacturer_description: Optional[str] = None
+    condition_dropdowns: Dict[str, str] = field(default_factory=dict)
+    price_suggestion: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -210,6 +216,22 @@ def render_service_description(
     if item.extra_notes:
         lines.append(f"Notes: {item.extra_notes.strip()}")
 
+    if (
+        item.brand
+        or item.model_number
+        or item.manufacturer_description
+        or item.manufacturer_url
+    ):
+        lines.extend(["", "Product & Manufacturer Details:"])
+        if item.brand:
+            lines.append(f"Brand: {item.brand.strip()}")
+        if item.model_number:
+            lines.append(f"Model Number: {item.model_number.strip()}")
+        if item.manufacturer_description:
+            lines.append(item.manufacturer_description.strip())
+        if item.manufacturer_url:
+            lines.append(f"Manufacturer Product Page: {item.manufacturer_url.strip()}")
+
     lines.extend(
         [
             "",
@@ -245,6 +267,23 @@ def _build_launchpad_html(bundle_payload: Dict[str, Any]) -> str:
     date_stamp = html.escape(bundle_payload["album"]["date_stamp"])
     oldest_name = html.escape(bundle_payload["album"]["oldest_photo"]["filename"])
     oldest_source = html.escape(bundle_payload["album"]["oldest_photo"]["source"])
+    exif_stripped = "Yes (EXIF/XMP removed)" if bundle_payload["album"].get("exif_stripped") else "No"
+    item_meta = bundle_payload.get("item", {})
+    enrichment_bits = []
+    if item_meta.get("brand") or item_meta.get("model_number"):
+        bm = " ".join(p for p in (item_meta.get("brand"), item_meta.get("model_number")) if p)
+        enrichment_bits.append(f"Product: <strong>{html.escape(bm)}</strong>")
+    if item_meta.get("manufacturer_url"):
+        murl = html.escape(item_meta["manufacturer_url"])
+        enrichment_bits.append(f'<a href="{murl}" target="_blank" rel="noopener noreferrer">Manufacturer Page</a>')
+    if item_meta.get("price_suggestion"):
+        ps = item_meta["price_suggestion"]
+        enrichment_bits.append(
+            f"Suggested Price: <strong>${ps['recommended_price']}</strong> (range ${ps['low_price']}–${ps['high_price']})"
+        )
+    enrichment_line = (
+        "<p>" + " &bull; ".join(enrichment_bits) + "</p>" if enrichment_bits else ""
+    )
 
     photo_cards = []
     for photo_path_str in bundle_payload["album"]["photos"]:
@@ -262,6 +301,7 @@ def _build_launchpad_html(bundle_payload: Dict[str, Any]) -> str:
         title = html.escape(listing["title"])
         price = html.escape(listing["formatted_price"])
         desc = html.escape(listing["description"])
+        cond_dd = html.escape(str(listing.get("condition_dropdown") or listing.get("condition") or ""))
         svc_id = html.escape(svc_key)
         service_cards.append(
             f"""
@@ -269,7 +309,7 @@ def _build_launchpad_html(bundle_payload: Dict[str, Any]) -> str:
               <div class="service-header">
                 <div>
                   <h2>{display}</h2>
-                  <p class="meta">Title: <strong>{title}</strong> &bull; Price: <strong>{price}</strong></p>
+                  <p class="meta">Title: <strong>{title}</strong> &bull; Price: <strong>{price}</strong> &bull; Dropdown Condition: <strong>{cond_dd}</strong></p>
                 </div>
                 <div class="actions">
                   <button type="button" onclick="copyText('title-{svc_id}')">Copy Title</button>
@@ -309,7 +349,8 @@ def _build_launchpad_html(bundle_payload: Dict[str, Any]) -> str:
 <body>
   <header>
     <h1>{album_title}</h1>
-    <p>Oldest Photo Date Stamp: <strong>{date_stamp}</strong> (from <code>{oldest_name}</code> via <code>{oldest_source}</code>)</p>
+    <p>Oldest Photo Date Stamp: <strong>{date_stamp}</strong> (from <code>{oldest_name}</code> via <code>{oldest_source}</code>) &bull; Metadata Stripped: <strong>{exif_stripped}</strong></p>
+    {enrichment_line}
   </header>
   <h2>Ordered Album Photos</h2>
   <div class="photos">
@@ -359,8 +400,13 @@ def render_all_listings(
             "price": numeric_price_value(item.price, svc),
             "formatted_price": format_price_for_service(item.price, svc),
             "condition": item.condition.strip(),
+            "condition_dropdown": item.condition_dropdowns.get(svc, item.condition.strip()),
             "location": item.location.strip(),
             "postal_code": item.postal_code.strip(),
+            "brand": item.brand,
+            "model_number": item.model_number,
+            "manufacturer_url": item.manufacturer_url,
+            "price_suggestion": item.price_suggestion,
             "description": description,
             "common_text": config.common_text.strip(),
             "service_unique_text": config.service_unique_text.get(svc, "").strip(),
@@ -375,11 +421,17 @@ def render_all_listings(
             "body": item.body.strip(),
             "price": item.price,
             "condition": item.condition.strip(),
+            "condition_dropdowns": dict(item.condition_dropdowns),
             "location": item.location.strip(),
             "postal_code": item.postal_code.strip(),
             "dimensions": item.dimensions,
             "extra_notes": item.extra_notes,
             "category_hint": item.category_hint,
+            "brand": item.brand,
+            "model_number": item.model_number,
+            "manufacturer_url": item.manufacturer_url,
+            "manufacturer_description": item.manufacturer_description,
+            "price_suggestion": item.price_suggestion,
         },
         "selected_services": canonical_services,
         "listings": listings,

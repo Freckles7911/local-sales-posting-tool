@@ -27,3 +27,8 @@ service_urls:
   craigslist: "https://post.craigslist.org"
   facebook: "https://www.facebook.com/marketplace/create/item"
   freecycle: "https://www.freecycle.org/town/ArlingtonVA"
+
+# Image privacy & background pipeline defaults (CLI flags override these)
+strip_exif: true
+remove_bg: false
+remove_bg_backend: "auto"  # auto | rembg | pillow | simple | command

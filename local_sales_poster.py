@@ -19,6 +19,7 @@ from local_sales.album import (
     collect_images,
     create_dated_album,
 )
+from local_sales.enrichment import enrich_listing_metadata
 from local_sales.exif_dates import find_oldest_photo
 from local_sales.posters import (
     DEFAULT_BROWSER_PROFILE_DIR,
@@ -97,24 +98,54 @@ def _run_prepare(args: argparse.Namespace) -> Dict[str, Any]:
     services = normalize_services(args.targets)
     image_inputs = _merge_image_inputs(args)
 
+    enriched = enrich_listing_metadata(
+        title=args.title,
+        description=args.description,
+        explicit_brand=args.brand,
+        explicit_model=args.model_number,
+        explicit_mfr_url=args.mfr_url,
+        mfr_text=args.mfr_text,
+        mfr_text_file=Path(args.mfr_text_file) if args.mfr_text_file else None,
+        fetch_mfr_online=args.lookup_mfr,
+        explicit_condition=args.condition,
+        explicit_msrp=args.msrp,
+    )
+
     album = create_dated_album(
         inputs=image_inputs,
         item_title=args.title,
         output_root=Path(args.output_dir),
         date_format=cfg.date_format,
         copy_mode=args.copy_mode,
+        strip_exif=args.strip_exif,
+        remove_bg=args.remove_bg,
+        remove_bg_backend=args.remove_bg_backend,
+        remove_bg_command=args.remove_bg_command,
+    )
+
+    raw_price = str(args.price).strip()
+    effective_price = (
+        str(enriched["price_suggestion"]["recommended_price"])
+        if raw_price.lower() == "auto"
+        else raw_price
     )
 
     item = ItemDetails(
         title=args.title,
         body=args.description,
-        price=args.price,
-        condition=args.condition,
+        price=effective_price,
+        condition=enriched["condition"]["display_label"],
         location=args.location or cfg.default_location,
         postal_code=args.postal_code or cfg.default_postal_code,
         dimensions=args.dimensions,
         extra_notes=args.notes,
         category_hint=args.category,
+        brand=enriched.get("brand"),
+        model_number=enriched.get("model_number"),
+        manufacturer_url=enriched.get("manufacturer_url"),
+        manufacturer_description=enriched.get("manufacturer_description"),
+        condition_dropdowns=enriched["condition"]["dropdown_values"],
+        price_suggestion=enriched["price_suggestion"],
     )
 
     rendered = render_all_listings(
@@ -141,6 +172,8 @@ def _run_prepare(args: argparse.Namespace) -> Dict[str, Any]:
 
     return {
         "album": album.to_dict(),
+        "enrichment": enriched,
+        "effective_price": effective_price,
         "bundle_json_path": rendered["bundle_json_path"],
         "launchpad_html_path": rendered["launchpad_html_path"],
         "selected_services": services,
@@ -150,19 +183,80 @@ def _run_prepare(args: argparse.Namespace) -> Dict[str, Any]:
 
 def _print_prepare_summary(summary: Dict[str, Any]) -> None:
     album = summary["album"]
+    enrichment = summary.get("enrichment", {})
     print(f"Created date-stamped album: {album['album_title']}")
     print(f"  Directory     : {album['album_dir']}")
     print(
         f"  Oldest photo  : {album['oldest_photo']['filename']} "
         f"({album['oldest_photo']['taken_at']}, source={album['oldest_photo']['source']})"
     )
-    print(f"  Photos staged : {len(album['photos'])}")
+    print(
+        f"  Photos staged : {len(album['photos'])} "
+        f"(EXIF stripped: {'yes' if album.get('exif_stripped') else 'no'})"
+    )
+    if enrichment.get("brand") or enrichment.get("model_number"):
+        print(
+            f"  Product ID    : brand={enrichment.get('brand') or '-'}, "
+            f"model={enrichment.get('model_number') or '-'}"
+        )
+    if enrichment.get("manufacturer_url"):
+        print(f"  Mfr Link      : {enrichment['manufacturer_url']}")
+    cond = enrichment.get("condition", {})
+    if cond:
+        print(
+            f"  Condition     : {cond.get('display_label')} ({cond.get('confidence')}) "
+            f"dropdowns={cond.get('dropdown_values')}"
+        )
+    ps = enrichment.get("price_suggestion", {})
+    if ps:
+        print(
+            f"  Price         : ${summary.get('effective_price')} "
+            f"(suggested ${ps.get('recommended_price')}, range ${ps.get('low_price')}-${ps.get('high_price')})"
+        )
     print(f"  Bundle JSON   : {summary['bundle_json_path']}")
     print(f"  Launchpad HTML: {summary['launchpad_html_path']}")
     print(f"  Services      : {', '.join(summary['selected_services'])}")
     if summary.get("google_photos"):
         gp = summary["google_photos"]
         print(f"  Google Photos : {gp.get('status')} ({gp.get('album_title')})")
+
+
+def _cmd_analyze(args: argparse.Namespace) -> int:
+    enriched = enrich_listing_metadata(
+        title=args.title,
+        description=args.description,
+        explicit_brand=args.brand,
+        explicit_model=args.model_number,
+        explicit_mfr_url=args.mfr_url,
+        mfr_text=args.mfr_text,
+        mfr_text_file=Path(args.mfr_text_file) if args.mfr_text_file else None,
+        fetch_mfr_online=args.lookup_mfr,
+        explicit_condition=args.condition,
+        explicit_msrp=args.msrp,
+    )
+    if args.json:
+        print(json.dumps(enriched, indent=2))
+        return 0
+
+    print(f"Title             : {args.title}")
+    print(f"Brand             : {enriched.get('brand') or '-'}")
+    print(f"Model Number      : {enriched.get('model_number') or '-'}")
+    print(f"Manufacturer Link : {enriched.get('manufacturer_url') or '-'}")
+    cond = enriched["condition"]
+    print(
+        f"Estimated Cond.   : {cond['display_label']} ({cond['canonical']}, "
+        f"confidence={cond['confidence']}, cues={cond['matched_cues']})"
+    )
+    print(f"Platform Dropdowns: {cond['dropdown_values']}")
+    ps = enriched["price_suggestion"]
+    print(
+        f"Suggested Price   : ${ps['recommended_price']} "
+        f"(range ${ps['low_price']}-${ps['high_price']}; {ps['rationale']})"
+    )
+    if enriched.get("manufacturer_description"):
+        print("\nExtracted Manufacturer Description:")
+        print(enriched["manufacturer_description"])
+    return 0
 
 
 def _cmd_prepare(args: argparse.Namespace) -> int:
@@ -209,6 +303,37 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_enrichment_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--brand", default=None, help="Explicit brand/manufacturer name.")
+    parser.add_argument("--model-number", default=None, help="Explicit model number.")
+    parser.add_argument(
+        "--mfr-url",
+        default=None,
+        help="Explicit manufacturer product page URL.",
+    )
+    parser.add_argument(
+        "--mfr-text",
+        default=None,
+        help="Raw manufacturer product text or HTML to extract description and MSRP from.",
+    )
+    parser.add_argument(
+        "--mfr-text-file",
+        default=None,
+        help="Path to text/HTML file containing manufacturer specs or product info.",
+    )
+    parser.add_argument(
+        "--lookup-mfr",
+        action="store_true",
+        help="Fetch --mfr-url online to extract product description when available.",
+    )
+    parser.add_argument(
+        "--msrp",
+        type=float,
+        default=None,
+        help="Optional original retail/MSRP price to anchor price suggestion.",
+    )
+
+
 def _add_prepare_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "positional_images",
@@ -230,13 +355,13 @@ def _add_prepare_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--price",
-        default="0",
-        help="Asking price for paid platforms (e.g. '45' or '$45'). Freecycle always shows FREE.",
+        default="auto",
+        help="Asking price ('auto' uses suggested price, or e.g. '45' / '$45'). Freecycle always shows FREE.",
     )
     parser.add_argument(
         "--condition",
-        default="Good",
-        help="Item condition (default: Good).",
+        default="auto",
+        help="Item condition ('auto' estimates from text cues, or e.g. 'Like New', 'Good', 'Fair').",
     )
     parser.add_argument(
         "--location",
@@ -251,6 +376,29 @@ def _add_prepare_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dimensions", default=None, help="Optional dimensions/specs.")
     parser.add_argument("--notes", default=None, help="Optional extra item notes.")
     parser.add_argument("--category", default=None, help="Optional category hint.")
+    _add_enrichment_arguments(parser)
+    parser.add_argument(
+        "--strip-exif",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Strip all EXIF/XMP/IPTC/comment metadata from staged album photos (default: enabled).",
+    )
+    parser.add_argument(
+        "--remove-bg",
+        action="store_true",
+        help="Run optional background removal pipeline on staged album photos.",
+    )
+    parser.add_argument(
+        "--remove-bg-backend",
+        choices=("auto", "rembg", "pillow", "simple", "command"),
+        default="auto",
+        help="Background removal backend (default: auto).",
+    )
+    parser.add_argument(
+        "--remove-bg-command",
+        default=None,
+        help="Custom command template when --remove-bg-backend=command, e.g. 'rembg i {input} {output}'.",
+    )
     parser.add_argument(
         "--targets",
         nargs="+",
@@ -365,6 +513,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_prepare_arguments(p_prepare)
     p_prepare.set_defaults(func=_cmd_prepare)
+
+    p_analyze = sub.add_parser(
+        "analyze",
+        help="Extract model number, manufacturer link/description, condition dropdowns, and suggested price.",
+    )
+    p_analyze.add_argument("--title", required=True, help="Item title.")
+    p_analyze.add_argument("--description", "--body", dest="description", required=True, help="Item description text.")
+    p_analyze.add_argument("--condition", default="auto", help="Explicit condition or 'auto'.")
+    _add_enrichment_arguments(p_analyze)
+    p_analyze.add_argument("--json", action="store_true", help="Output JSON.")
+    p_analyze.set_defaults(func=_cmd_analyze)
 
     p_post = sub.add_parser(
         "post",

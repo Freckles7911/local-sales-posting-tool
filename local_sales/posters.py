@@ -28,6 +28,7 @@ class PostingTarget:
     price_selectors: Sequence[str]
     postal_selectors: Sequence[str]
     description_selectors: Sequence[str]
+    condition_selectors: Sequence[str]
     file_input_selectors: Sequence[str]
     publish_selectors: Sequence[str]
     login_indicators: Sequence[str]
@@ -53,6 +54,10 @@ POSTING_TARGETS: Dict[str, PostingTarget] = {
         description_selectors=(
             'textarea[name="PostingBody"]',
             '#PostingBody',
+        ),
+        condition_selectors=(
+            'select[name="sale_condition"]',
+            '#sale_condition',
         ),
         file_input_selectors=(
             'input[type="file"]',
@@ -86,6 +91,10 @@ POSTING_TARGETS: Dict[str, PostingTarget] = {
             'label:has-text("Description") textarea',
             'textarea[aria-label="Description"]',
         ),
+        condition_selectors=(
+            'label:has-text("Condition")',
+            '[aria-label="Condition"]',
+        ),
         file_input_selectors=(
             'input[type="file"][accept*="image"]',
             'input[type="file"]',
@@ -118,6 +127,9 @@ POSTING_TARGETS: Dict[str, PostingTarget] = {
             'textarea[name="description"]',
             'textarea[name="body"]',
             "textarea",
+        ),
+        condition_selectors=(
+            'select[name*="condition" i]',
         ),
         file_input_selectors=(
             'input[type="file"]',
@@ -189,6 +201,44 @@ class PlaywrightPoster:
                 if loc.count() > 0 and loc.is_visible(timeout=1200):
                     loc.fill(value)
                     return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def _select_condition(
+        page: Any, target: PostingTarget, condition_value: str
+    ) -> bool:
+        """Select item condition in a native <select> or ARIA dropdown if present."""
+        if not condition_value:
+            return False
+        want = condition_value.strip().lower()
+        for selector in target.condition_selectors:
+            try:
+                loc = page.locator(selector).first
+                if loc.count() == 0 or not loc.is_visible(timeout=1200):
+                    continue
+                tag = loc.evaluate("el => el.tagName.toLowerCase()")
+                if tag == "select":
+                    options = loc.locator("option").all()
+                    for opt in options:
+                        opt_label = (opt.inner_text() or "").strip()
+                        opt_val = (opt.get_attribute("value") or "").strip()
+                        if want in opt_label.lower() or want == opt_val.lower():
+                            if opt_val:
+                                loc.select_option(value=opt_val)
+                            else:
+                                loc.select_option(label=opt_label)
+                            return True
+                else:
+                    loc.click()
+                    page.wait_for_timeout(300)
+                    opt_loc = page.locator(
+                        f'[role="option"]:has-text("{condition_value}")'
+                    ).first
+                    if opt_loc.count() > 0:
+                        opt_loc.click()
+                        return True
             except Exception:
                 continue
         return False
@@ -308,6 +358,14 @@ class PlaywrightPoster:
                     filled_desc = self._fill_first_match(
                         page, target.description_selectors, listing["description"]
                     )
+                    condition_val = str(
+                        listing.get("condition_dropdown")
+                        or listing.get("condition")
+                        or ""
+                    )
+                    selected_condition = self._select_condition(
+                        page, target, condition_val
+                    )
                     uploaded_photos = self._upload_photos(
                         page, target.file_input_selectors, listing["photos"]
                     )
@@ -332,6 +390,7 @@ class PlaywrightPoster:
                             "price": filled_price,
                             "location_or_postal": filled_postal,
                             "description": filled_desc,
+                            "condition_selected": selected_condition,
                             "photos_uploaded": uploaded_photos,
                         },
                     }

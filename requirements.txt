@@ -1,7 +1,12 @@
-# Core CLI, EXIF oldest-photo detection, date-stamped album creation,
-# multi-platform templating, and launchpad.html work with Python 3.9+ stdlib only.
+# Core CLI, EXIF oldest-photo detection, EXIF/PNG metadata stripping,
+# enrichment, condition estimation, price suggestions, and launchpad.html
+# work with Python 3.9+ stdlib only.
 #
-# Optional packages for YAML config loading and Playwright browser automation:
+# Optional packages for YAML config loading, Playwright browser automation,
+# and AI/JPEG background removal:
 PyYAML>=6.0
 requests>=2.31.0
 playwright>=1.40.0
+# Optional for advanced photo background removal:
+# Pillow>=10.0.0
+# rembg>=2.0.50

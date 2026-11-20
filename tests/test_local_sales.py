@@ -12,13 +12,30 @@ import sys
 import tempfile
 import unittest
 import zipfile
+import zlib
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from local_sales.album import GooglePhotosClient, collect_images, create_dated_album
-from local_sales.exif_dates import find_oldest_photo, parse_jpeg_exif_datetime
+from local_sales.enrichment import (
+    estimate_condition,
+    extract_manufacturer_description,
+    extract_model_and_brand,
+    resolve_manufacturer_links,
+    suggest_price,
+)
+from local_sales.exif_dates import (
+    find_oldest_photo,
+    parse_jpeg_exif_datetime,
+    parse_xmp_datetime,
+)
+from local_sales.image_pipeline import (
+    PNG_SIGNATURE,
+    has_exif_or_xmp_metadata,
+    strip_png_metadata,
+)
 from local_sales.posters import load_listing_bundle
 from local_sales.templates import (
     ItemDetails,
@@ -340,6 +357,279 @@ class LocalSalesTests(unittest.TestCase):
             )
             post_data = json.loads(post_proc.stdout)
             self.assertIn(post_data["status"], ("playwright_not_installed", "completed"))
+
+    def test_exif_and_xmp_stripped_from_album_photos_and_png(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src_dir = root / "photos"
+            src_dir.mkdir()
+            exif_pic = src_dir / "old_exif.jpg"
+            xmp_pic = src_dir / "newer_xmp.jpg"
+            exif_pic.write_bytes(build_jpeg_with_exif("2026:03:14 09:30:00"))
+            xmp_pic.write_bytes(build_plain_jpeg_with_xmp("2026-04-20T12:00:00"))
+
+            self.assertTrue(has_exif_or_xmp_metadata(exif_pic))
+            self.assertTrue(has_exif_or_xmp_metadata(xmp_pic))
+
+            album = create_dated_album(
+                inputs=[src_dir],
+                item_title="Clean Photo Test",
+                output_root=root / "albums",
+                strip_exif=True,
+            )
+            # Oldest date stamp must be read BEFORE stripping metadata.
+            self.assertEqual(album.date_stamp, "2026-03-14")
+            self.assertTrue(album.exif_stripped)
+
+            for staged in album.photos:
+                data = staged.read_bytes()
+                self.assertIsNone(parse_jpeg_exif_datetime(data))
+                self.assertIsNone(parse_xmp_datetime(data))
+                self.assertFalse(has_exif_or_xmp_metadata(staged))
+                self.assertTrue(data.startswith(b"\xff\xd8"))
+                self.assertTrue(data.endswith(b"\xff\xd9"))
+
+            # Verify PNG metadata chunk stripping (eXIf and tEXt removed)
+            def _chunk(ctype: bytes, payload: bytes) -> bytes:
+                crc = zlib.crc32(ctype + payload) & 0xFFFFFFFF
+                return struct.pack(">I", len(payload)) + ctype + payload + struct.pack(">I", crc)
+
+            ihdr = struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0)
+            raw_scan = b"\x00" + (b"\xff\xff\xff" * 2) + b"\x00" + (b"\xff\xff\xff" * 2)
+            dirty_png = (
+                PNG_SIGNATURE
+                + _chunk(b"IHDR", ihdr)
+                + _chunk(b"tEXt", b"Comment\x00Secret GPS")
+                + _chunk(b"eXIf", b"II\x2a\x00\x00\x00\x00\x00")
+                + _chunk(b"IDAT", zlib.compress(raw_scan))
+                + _chunk(b"IEND", b"")
+            )
+            png_path = root / "dirty.png"
+            png_path.write_bytes(dirty_png)
+            self.assertTrue(has_exif_or_xmp_metadata(png_path))
+            clean_png = strip_png_metadata(dirty_png)
+            clean_path = root / "clean.png"
+            clean_path.write_bytes(clean_png)
+            self.assertFalse(has_exif_or_xmp_metadata(clean_path))
+            self.assertNotIn(b"tEXt", clean_png)
+            self.assertNotIn(b"eXIf", clean_png)
+
+    def test_optional_background_removal_pipeline(self) -> None:
+        def _chunk(ctype: bytes, payload: bytes) -> bytes:
+            crc = zlib.crc32(ctype + payload) & 0xFFFFFFFF
+            return struct.pack(">I", len(payload)) + ctype + payload + struct.pack(">I", crc)
+
+        w, h = 10, 10
+        raw_rows = bytearray()
+        for y in range(h):
+            raw_rows.append(0)
+            for x in range(w):
+                if 3 <= x <= 6 and 3 <= y <= 6:
+                    raw_rows.extend((20, 40, 220))  # foreground object
+                else:
+                    raw_rows.extend((250, 250, 250))  # uniform background border
+
+        ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+        png_bytes = (
+            PNG_SIGNATURE
+            + _chunk(b"IHDR", ihdr)
+            + _chunk(b"tEXt", b"Software\x00Camera")
+            + _chunk(b"IDAT", zlib.compress(bytes(raw_rows)))
+            + _chunk(b"IEND", b"")
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src_png = root / "2026-02-01_product.png"
+            src_png.write_bytes(png_bytes)
+
+            album = create_dated_album(
+                inputs=[src_png],
+                item_title="Blue Widget",
+                output_root=root / "albums",
+                strip_exif=True,
+                remove_bg=True,
+                remove_bg_backend="simple",
+            )
+            self.assertEqual(album.date_stamp, "2026-02-01")
+            self.assertEqual(len(album.background_removal), 1)
+            self.assertTrue(album.background_removal[0]["applied"])
+            self.assertEqual(album.background_removal[0]["backend"], "simple")
+
+            staged_png = album.photos[0]
+            self.assertFalse(has_exif_or_xmp_metadata(staged_png))
+
+            # Decode staged PNG and verify corner became transparent while center stayed opaque.
+            out_bytes = staged_png.read_bytes()
+            self.assertEqual(out_bytes[:8], PNG_SIGNATURE)
+            # Color type at IHDR byte index 8+4(len)+4(IHDR)+9 = byte 25 should be 6 (RGBA)
+            self.assertEqual(out_bytes[25], 6)
+            pos = 8
+            idat = bytearray()
+            while pos + 12 <= len(out_bytes):
+                length = struct.unpack_from(">I", out_bytes, pos)[0]
+                ctype = out_bytes[pos + 4 : pos + 8]
+                if ctype == b"IDAT":
+                    idat.extend(out_bytes[pos + 8 : pos + 8 + length])
+                pos += 12 + length
+            decompressed = zlib.decompress(bytes(idat))
+            # Corner pixel (0,0) alpha byte at offset 1 + 3
+            self.assertEqual(decompressed[4], 0)
+            # Center pixel (5,5) alpha byte at row 5 * (1 + 40) + 1 + 5*4 + 3
+            center_alpha_idx = 5 * (1 + w * 4) + 1 + 5 * 4 + 3
+            self.assertEqual(decompressed[center_alpha_idx], 255)
+
+    def test_model_number_manufacturer_link_and_description_extraction(self) -> None:
+        title = "Sony WH-1000XM5 Wireless Noise Canceling Headphones"
+        desc = "Barely used, like new in original carrying case."
+        mfr_raw = (
+            "Add to cart\n"
+            "Industry-leading noise cancellation powered by dual processors and 8 microphones.\n"
+            "- Battery Life: Up to 30 hours with quick charge\n"
+            "- Multipoint Bluetooth 5.2 connection\n"
+            "MSRP $399.99\n"
+        )
+        brand, model = extract_model_and_brand(f"{title}\n{desc}")
+        self.assertEqual(brand, "Sony")
+        self.assertEqual(model, "WH-1000XM5")
+
+        links = resolve_manufacturer_links(brand, model)
+        self.assertIsNotNone(links["product_url"])
+        self.assertIn("sony.com", links["product_url"])
+        self.assertIn("WH-1000XM5", links["product_url"])
+
+        parsed = extract_manufacturer_description(mfr_text=mfr_raw)
+        self.assertIn("dual processors", parsed["summary"])
+        self.assertGreaterEqual(len(parsed["bullets"]), 2)
+        self.assertAlmostEqual(parsed["detected_msrp"], 399.99, places=2)
+
+        html_sample = """
+        <html><head>
+        <script type="application/ld+json">
+        {"@type": "Product", "name": "Garmin Forerunner 945", "brand": {"name": "Garmin"},
+         "model": "010-02063-00", "description": "GPS running smartwatch with music.",
+         "offers": {"price": "499.99"}}
+        </script></head><body><li>Up to 2 weeks battery life</li></body></html>
+        """
+        html_parsed = extract_manufacturer_description(mfr_text=html_sample)
+        self.assertEqual(html_parsed["brand"], "Garmin")
+        self.assertEqual(html_parsed["model_number"], "010-02063-00")
+        self.assertIn("GPS running smartwatch", html_parsed["summary"])
+        self.assertAlmostEqual(html_parsed["detected_msrp"], 499.99, places=2)
+
+    def test_condition_estimation_dropdown_mapping_and_price_suggestion(self) -> None:
+        c_new = estimate_condition("Brand new sealed in box microwave")
+        self.assertEqual(c_new.canonical, "new")
+        self.assertEqual(c_new.dropdown_values["facebook"], "New")
+
+        c_like = estimate_condition("Barely used, like new in open box")
+        self.assertEqual(c_like.canonical, "like_new")
+        self.assertEqual(c_like.dropdown_values["craigslist"], "like new")
+        self.assertEqual(c_like.dropdown_values["facebook"], "Used - Like New")
+        self.assertEqual(c_like.dropdown_values["freecycle"], "Like New")
+
+        c_fair = estimate_condition("Works fine, some scratches and cosmetic wear")
+        self.assertEqual(c_fair.canonical, "fair")
+        self.assertEqual(c_fair.dropdown_values["craigslist"], "fair")
+
+        p_like = suggest_price(
+            "Sony WH-1000XM5 Headphones",
+            "Like new. MSRP $400.",
+            condition_canonical="like_new",
+        )
+        p_fair = suggest_price(
+            "Sony WH-1000XM5 Headphones",
+            "Fair condition. MSRP $400.",
+            condition_canonical="fair",
+        )
+        self.assertLess(p_fair.recommended_price, p_like.recommended_price)
+        self.assertEqual(p_like.reference_retail_price, 400)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pic_dir = root / "pics"
+            pic_dir.mkdir()
+            (pic_dir / "item.jpg").write_bytes(build_jpeg_with_exif("2026:01:05 11:00:00"))
+            cli = str(PROJECT_ROOT / "local_sales_poster.py")
+
+            analyze_proc = subprocess.run(
+                [
+                    sys.executable,
+                    cli,
+                    "analyze",
+                    "--title",
+                    "Sony WH-1000XM5 Headphones",
+                    "--description",
+                    "Barely used, like new in open box. Originally $399.",
+                    "--mfr-text",
+                    "Dual processor noise cancellation with 30-hour battery.",
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            analyzed = json.loads(analyze_proc.stdout)
+            self.assertEqual(analyzed["brand"], "Sony")
+            self.assertEqual(analyzed["model_number"], "WH-1000XM5")
+            self.assertEqual(analyzed["condition"]["canonical"], "like_new")
+            self.assertGreater(analyzed["price_suggestion"]["recommended_price"], 0)
+
+            prep_proc = subprocess.run(
+                [
+                    sys.executable,
+                    cli,
+                    "prepare",
+                    str(pic_dir),
+                    "--title",
+                    "Sony WH-1000XM5 Headphones",
+                    "--description",
+                    "Barely used, like new in open box. Originally $400.",
+                    "--mfr-text",
+                    "Dual processor noise cancellation.",
+                    "--condition",
+                    "auto",
+                    "--price",
+                    "auto",
+                    "--targets",
+                    "craigslist",
+                    "facebook",
+                    "freecycle.com",
+                    "--output-dir",
+                    str(root / "out"),
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            prep_data = json.loads(prep_proc.stdout)
+            bundle = load_listing_bundle(Path(prep_data["bundle_json_path"]))
+            self.assertTrue(bundle["album"]["exif_stripped"])
+            self.assertFalse(
+                has_exif_or_xmp_metadata(Path(bundle["album"]["photos"][0]))
+            )
+            self.assertEqual(
+                bundle["listings"]["craigslist"]["condition_dropdown"], "like new"
+            )
+            self.assertEqual(
+                bundle["listings"]["facebook"]["condition_dropdown"], "Used - Like New"
+            )
+            self.assertEqual(
+                bundle["listings"]["craigslist"]["price"],
+                str(bundle["item"]["price_suggestion"]["recommended_price"]),
+            )
+            self.assertEqual(bundle["listings"]["freecycle"]["price"], "0")
+            self.assertIn(
+                "WH-1000XM5", bundle["listings"]["craigslist"]["description"]
+            )
+            self.assertIn(
+                "sony.com", bundle["listings"]["craigslist"]["description"]
+            )
+            self.assertIn(
+                "Dual processor noise cancellation",
+                bundle["listings"]["craigslist"]["description"],
+            )
 
 
 if __name__ == "__main__":

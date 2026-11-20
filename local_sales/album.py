@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 import json
 import mimetypes
 import os
@@ -16,6 +16,7 @@ import urllib.request
 import zipfile
 
 from .exif_dates import PhotoMeta, find_oldest_photo
+from .image_pipeline import remove_photo_background, strip_image_metadata_file
 
 
 SUPPORTED_IMAGE_EXTENSIONS = {
@@ -47,6 +48,8 @@ class AlbumBundle:
     photo_metas: List[PhotoMeta]
     manifest_path: Path
     google_photos_album_id: Optional[str] = None
+    exif_stripped: bool = True
+    background_removal: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -58,6 +61,8 @@ class AlbumBundle:
             "photo_metas": [m.to_dict() for m in self.photo_metas],
             "manifest_path": str(self.manifest_path),
             "google_photos_album_id": self.google_photos_album_id,
+            "exif_stripped": self.exif_stripped,
+            "background_removal": list(self.background_removal),
         }
 
 
@@ -164,9 +169,14 @@ def create_dated_album(
     output_root: Path,
     date_format: str = "%Y-%m-%d",
     copy_mode: str = "copy",
+    strip_exif: bool = True,
+    remove_bg: bool = False,
+    remove_bg_backend: str = "auto",
+    remove_bg_command: Optional[str] = None,
 ) -> AlbumBundle:
     """Create a local date-stamped album named from the oldest photo in the batch."""
     images = collect_images([Path(p) for p in inputs])
+    # Always inspect capture dates BEFORE stripping EXIF from staged copies.
     oldest, sorted_metas = find_oldest_photo(images)
 
     date_stamp = oldest.taken_at.strftime(date_format)
@@ -178,11 +188,29 @@ def create_dated_album(
     photos_dir.mkdir(parents=True, exist_ok=True)
 
     placed_photos: List[Path] = []
+    bg_results: List[Dict[str, Any]] = []
     width = max(2, len(str(len(sorted_metas))))
     for idx, meta in enumerate(sorted_metas, start=1):
         target_name = f"{idx:0{width}d}_{meta.path.name}"
         target_path = photos_dir / target_name
-        _place_photo(meta.path, target_path, copy_mode=copy_mode)
+        if target_path.exists() or target_path.is_symlink():
+            target_path.unlink()
+
+        if remove_bg:
+            bg_res = remove_photo_background(
+                meta.path,
+                target_path,
+                backend=remove_bg_backend,
+                custom_command=remove_bg_command,
+            )
+            bg_results.append(bg_res.to_dict())
+            if strip_exif:
+                strip_image_metadata_file(target_path, target_path)
+        elif strip_exif:
+            strip_image_metadata_file(meta.path, target_path)
+        else:
+            _place_photo(meta.path, target_path, copy_mode=copy_mode)
+
         placed_photos.append(target_path)
 
     manifest_path = album_dir / "album_manifest.json"
@@ -194,12 +222,16 @@ def create_dated_album(
         photos=placed_photos,
         photo_metas=sorted_metas,
         manifest_path=manifest_path,
+        exif_stripped=strip_exif,
+        background_removal=bg_results,
     )
 
     manifest_payload = {
         **bundle.to_dict(),
         "copy_mode": copy_mode,
         "photo_count": len(placed_photos),
+        "remove_bg": remove_bg,
+        "remove_bg_backend": remove_bg_backend if remove_bg else None,
     }
     manifest_path.write_text(
         json.dumps(manifest_payload, indent=2) + "\n", encoding="utf-8"

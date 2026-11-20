@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-11-20T12:01:18-05:00 — Milestone M2 Completed: EXIF Stripping, Optional Background Removal, Manufacturer Enrichment, Condition & Price Suggestion
+- **Completed**:
+  - Created `local_sales/image_pipeline.py`: pure-Python lossless JPEG (`APP1`..`APP15`, `COM`) and PNG (`eXIf`, `tEXt`, `zTXt`, `iTXt`, `tIME`, `iCCP`) metadata stripping (`--strip-exif`, enabled by default after reading oldest-photo timestamps), plus optional pluggable background removal (`--remove-bg`, supporting `rembg`, `Pillow`, pure-Python `simple` PNG edge-flood keyer, or custom `--remove-bg-command`).
+  - Created `local_sales/enrichment.py`: automatic brand & model number extraction (`extract_model_and_brand`), official manufacturer product page link resolution (`resolve_manufacturer_links`), manufacturer description/spec/MSRP extraction from plain text, HTML/JSON-LD, or optional online fetch (`extract_manufacturer_description`), condition estimation + exact platform dropdown mapping (`estimate_condition`), and resale price suggestion (`suggest_price`).
+  - Integrated enrichment, EXIF stripping, background removal, and condition dropdown filling across `local_sales/album.py`, `local_sales/templates.py`, `local_sales/posters.py`, `userscript/local-sales-autofill.user.js`, and `local_sales_poster.py` (added `analyze` subcommand plus `--condition auto`, `--price auto`, `--mfr-text`, `--mfr-url`, `--lookup-mfr`, `--msrp`, `--strip-exif`/`--no-strip-exif`, `--remove-bg`).
+  - Expanded unit & CLI integration tests (`tests/test_local_sales.py`) and verified 8/8 passing (`python3 -m unittest discover -s tests -v`).
+- **In Progress / Current State**:
+  - Milestones M1 and M2 complete and verified; ready to push M2 commit to `origin/main` and sync `~/brain`.
+- **Next Steps**:
+  - Milestone M3: optional live Playwright Chromium login onboarding and Google Photos OAuth token setup.
+- **Blockers / Decisions Needed**:
+  - None.
+
+---
+
 ## 2026-11-20T11:28:34-05:00 — Milestone M1 Completed & GitHub Repository Published
 - **Completed**:
   - Built core Python package (`local_sales/exif_dates.py`, `local_sales/album.py`, `local_sales/templates.py`, `local_sales/posters.py`) and executable CLI (`local_sales_poster.py`) strictly inside WSL (`/home/user/projects/local-sales-posting-tool`).

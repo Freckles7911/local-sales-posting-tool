@@ -51,6 +51,52 @@
     return false;
   }
 
+  function selectConditionDropdown(service, listing) {
+    const condValue = (listing.condition_dropdown || listing.condition || "").trim();
+    if (!condValue) return false;
+    const want = condValue.toLowerCase();
+
+    const selectSelectors =
+      service === "craigslist"
+        ? ['select[name="sale_condition"]', "#sale_condition"]
+        : service === "freecycle"
+        ? ['select[name*="condition" i]']
+        : [];
+
+    for (const sel of selectSelectors) {
+      const selectEl = document.querySelector(sel);
+      if (!selectEl) continue;
+      for (const opt of Array.from(selectEl.options || [])) {
+        const text = (opt.textContent || "").trim().toLowerCase();
+        const val = (opt.value || "").trim().toLowerCase();
+        if (text.includes(want) || val === want) {
+          selectEl.value = opt.value;
+          selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        }
+      }
+    }
+
+    if (service === "facebook") {
+      const trigger =
+        document.querySelector('[aria-label="Condition"]') ||
+        Array.from(document.querySelectorAll("label")).find((el) =>
+          (el.textContent || "").includes("Condition")
+        );
+      if (trigger) {
+        trigger.click();
+        window.setTimeout(() => {
+          const opt = Array.from(document.querySelectorAll('[role="option"]')).find(
+            (el) => (el.textContent || "").toLowerCase().includes(want)
+          );
+          if (opt) opt.click();
+        }, 250);
+        return true;
+      }
+    }
+    return false;
+  }
+
   function applyListing(bundle) {
     const listing = bundle?.listings?.[DETECTED_SERVICE];
     if (!listing) {
@@ -74,10 +120,22 @@
       fillFirst(['textarea[name="description"]', 'textarea[name="body"]', "textarea"], listing.description);
     }
 
+    selectConditionDropdown(DETECTED_SERVICE, listing);
+
     const photoCount = (listing.photos || []).length;
     const albumDir = bundle?.album?.album_dir || "";
+    const extraInfo = [
+      listing.model_number ? `Model: ${listing.model_number}` : "",
+      listing.condition_dropdown ? `Condition: ${listing.condition_dropdown}` : "",
+      listing.price_suggestion?.recommended_price != null
+        ? `Suggested: $${listing.price_suggestion.recommended_price}`
+        : "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
     statusEl.textContent =
-      `Filled ${listing.display_name}. Upload ${photoCount} photo(s) from: ${albumDir}/photos`;
+      `Filled ${listing.display_name}${extraInfo ? " (" + extraInfo + ")" : ""}. ` +
+      `Upload ${photoCount} EXIF-stripped photo(s) from: ${albumDir}/photos`;
   }
 
   const container = document.createElement("div");
